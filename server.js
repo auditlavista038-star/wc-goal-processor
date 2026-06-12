@@ -82,29 +82,29 @@ app.post('/process-goal', async (req, res) => {
     if (photoPath && fs.existsSync(photoPath)) {
       // With photo background
       ffmpegCmd = `ffmpeg -y -loop 1 -i ${photoPath} \
-        -f lavfi -i anullsrc=r=44100:cl=stereo \
-        -vf "scale=1080:1920:force_original_aspect_ratio=increase,\
-crop=1080:1920,\
-boxblur=10:10,\
-drawtext=text='GOAL':fontcolor=yellow:fontsize=150:x=(w-text_w)/2:y=250:shadowcolor=black:shadowx=5:shadowy=5,\
-drawtext=text='${scorerText}':fontcolor=white:fontsize=65:x=(w-text_w)/2:y=450:box=1:boxcolor=red@0.8:boxborderw=15,\
-drawtext=text='${scoreText}':fontcolor=white:fontsize=55:x=(w-text_w)/2:y=600:box=1:boxcolor=black@0.7:boxborderw=12,\
-drawtext=text='FIFA WORLD CUP 2026':fontcolor=white:fontsize=36:x=(w-text_w)/2:y=1820:box=1:boxcolor=red@0.9:boxborderw=10" \
-        -map 0:v -map 1:a \
-        -c:v libx264 -preset fast -crf 23 -t 30 -r 30 \
-        -shortest ${outputFile}`;
+  -f lavfi -i anullsrc=r=44100:cl=stereo \
+  -vf "scale=720:1280:force_original_aspect_ratio=increase,\
+crop=720:1280,\
+boxblur=8:8,\
+drawtext=text='GOAL':fontcolor=yellow:fontsize=100:x=(w-text_w)/2:y=150:shadowcolor=black:shadowx=4:shadowy=4,\
+drawtext=text='${scorerText}':fontcolor=white:fontsize=50:x=(w-text_w)/2:y=300:box=1:boxcolor=red@0.8:boxborderw=10,\
+drawtext=text='${scoreText}':fontcolor=white:fontsize=40:x=(w-text_w)/2:y=400:box=1:boxcolor=black@0.7:boxborderw=8,\
+drawtext=text='FIFA WORLD CUP 2026':fontcolor=white:fontsize=28:x=(w-text_w)/2:y=1200:box=1:boxcolor=red@0.9:boxborderw=8" \
+  -map 0:v -map 1:a \
+  -c:v libx264 -preset ultrafast -crf 28 -t 15 -r 24 \
+  -shortest ${outputFile}`;
     } else {
       // Plain background fallback
       ffmpegCmd = `ffmpeg -y \
-        -f lavfi -i color=c=0x1a1a2e:size=1080x1920:rate=30 \
-        -f lavfi -i anullsrc=r=44100:cl=stereo \
-        -vf "drawtext=text='GOAL':fontcolor=yellow:fontsize=180:x=(w-text_w)/2:y=300:shadowcolor=black:shadowx=6:shadowy=6,\
-drawtext=text='${scorerText}':fontcolor=white:fontsize=65:x=(w-text_w)/2:y=550:box=1:boxcolor=red@0.8:boxborderw=15,\
-drawtext=text='${scoreText}':fontcolor=white:fontsize=55:x=(w-text_w)/2:y=700:box=1:boxcolor=black@0.7:boxborderw=12,\
-drawtext=text='FIFA WORLD CUP 2026':fontcolor=white:fontsize=36:x=(w-text_w)/2:y=1820:box=1:boxcolor=red@0.9:boxborderw=10" \
-        -map 0:v -map 1:a \
-        -c:v libx264 -preset fast -crf 23 -t 30 -r 30 \
-        -shortest ${outputFile}`;
+  -f lavfi -i color=c=0x1a1a2e:size=720x1280:rate=24 \
+  -f lavfi -i anullsrc=r=44100:cl=stereo \
+  -vf "drawtext=text='GOAL':fontcolor=yellow:fontsize=120:x=(w-text_w)/2:y=200:shadowcolor=black:shadowx=5:shadowy=5,\
+drawtext=text='${scorerText}':fontcolor=white:fontsize=50:x=(w-text_w)/2:y=380:box=1:boxcolor=red@0.8:boxborderw=10,\
+drawtext=text='${scoreText}':fontcolor=white:fontsize=40:x=(w-text_w)/2:y=480:box=1:boxcolor=black@0.7:boxborderw=8,\
+drawtext=text='FIFA WORLD CUP 2026':fontcolor=white:fontsize=28:x=(w-text_w)/2:y=1200:box=1:boxcolor=red@0.9:boxborderw=8" \
+  -map 0:v -map 1:a \
+  -c:v libx264 -preset ultrafast -crf 28 -t 15 -r 24 \
+  -shortest ${outputFile}`;
     }
 
     execSync(ffmpegCmd, { timeout: 120000 });
