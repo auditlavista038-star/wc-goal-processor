@@ -3,6 +3,8 @@ const cors = require('cors');
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
+const http = require('http');
 
 const app = express();
 app.use(cors());
@@ -10,6 +12,54 @@ app.use(express.json());
 app.use('/videos', express.static('/tmp/videos'));
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+function downloadFile(url, dest, maxRedirects = 5) {
+  return new Promise((resolve, reject) => {
+    if (maxRedirects === 0) return reject(new Error('Too many redirects'));
+    const client = url.startsWith('https') ? https : http;
+    const file = fs.createWriteStream(dest);
+    client.get(url, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307) {
+        file.close();
+        fs.unlink(dest, () => {});
+        return downloadFile(res.headers.location, dest, maxRedirects - 1).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        file.close();
+        fs.unlink(dest, () => {});
+        return reject(new Error('HTTP ' + res.statusCode));
+      }
+      res.pipe(file);
+      file.on('finish', () => { file.close(); resolve(); });
+    }).on('error', (err) => { fs.unlink(dest, () => {}); reject(err); });
+  });
+}
+
+async function downloadCrowdAudio(matchId) {
+  // Multiple free crowd audio sources to try
+  const sources = [
+    'https://www.zapsplat.com/wp-content/uploads/2015/sound-effects-61905/zapsplat_sport_soccer_football_crowd_cheer_goal_scored_001_61906.mp3',
+    'https://cdn.freesound.org/previews/511/511484_5121236-lq.mp3',
+    'https://cdn.freesound.org/previews/323/323703_5121236-lq.mp3',
+    'https://cdn.freesound.org/previews/264/264828_4921277-lq.mp3'
+  ];
+  
+  const audioPath = '/tmp/crowd_' + matchId + '.mp3';
+  
+  for (const url of sources) {
+    try {
+      await downloadFile(url, audioPath);
+      if (fs.existsSync(audioPath) && fs.statSync(audioPath).size > 10000) {
+        console.log('Downloaded crowd audio from: ' + url);
+        return audioPath;
+      }
+    } catch(e) {
+      console.log('Audio source failed: ' + url);
+      if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
+    }
+  }
+  return null;
+}
 
 async function searchAndDownloadGoalClip(homeTeam, awayTeam, scorer, matchId) {
   try {
@@ -59,22 +109,31 @@ app.post('/process-goal', async (req, res) => {
     console.log('Searching for FIFA clip...');
     const clipPath = await searchAndDownloadGoalClip(homeTeam, awayTeam, scorer, matchId);
 
+    console.log('Downloading crowd audio...');
+    const audioPath = await downloadCrowdAudio(matchId);
+    const hasAudio = audioPath && fs.existsSync(audioPath);
+
     let ffmpegCmd;
 
     if (clipPath && fs.existsSync(clipPath)) {
       console.log('Using real FIFA clip');
-      // Hype audio: crowd roar simulation using sine sweeps mixed together
-      const audioFilter = 'aevalsrc=\'0.3*sin(2*PI*440*t)+0.2*sin(2*PI*880*t)+0.15*sin(2*PI*220*t)\':s=44100:c=stereo,volume=2';
-      ffmpegCmd = 'ffmpeg -y -i ' + clipPath + ' -f lavfi -i "' + audioFilter + '" -filter_complex "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2" -vf "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=720:1280,setpts=PTS/1.05,drawtext=text=\'GOAL\':fontcolor=yellow:fontsize=80:x=(w-text_w)/2:y=80:shadowcolor=black:shadowx=4:shadowy=4:box=1:boxcolor=black@0.5:boxborderw=10,drawtext=text=\'' + scorerText + '\':fontcolor=white:fontsize=50:x=(w-text_w)/2:y=180:box=1:boxcolor=red@0.8:boxborderw=10,drawtext=text=\'' + scoreText + '\':fontcolor=white:fontsize=40:x=(w-text_w)/2:y=260:box=1:boxcolor=black@0.7:boxborderw=8,drawtext=text=\'FIFA WORLD CUP 2026\':fontcolor=white:fontsize=28:x=(w-text_w)/2:y=1220:box=1:boxcolor=red@0.9:boxborderw=8" -c:v libx264 -preset ultrafast -crf 28 -t 45 -r 24 ' + outputFile;
+      if (hasAudio) {
+        ffmpegCmd = 'ffmpeg -y -i ' + clipPath + ' -i ' + audioPath + ' -filter_complex "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2[aout]" -vf "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=720:1280,setpts=PTS/1.05,drawtext=text=\'GOAL\':fontcolor=yellow:fontsize=80:x=(w-text_w)/2:y=80:shadowcolor=black:shadowx=4:shadowy=4:box=1:boxcolor=black@0.5:boxborderw=10,drawtext=text=\'' + scorerText + '\':fontcolor=white:fontsize=50:x=(w-text_w)/2:y=180:box=1:boxcolor=red@0.8:boxborderw=10,drawtext=text=\'' + scoreText + '\':fontcolor=white:fontsize=40:x=(w-text_w)/2:y=260:box=1:boxcolor=black@0.7:boxborderw=8,drawtext=text=\'FIFA WORLD CUP 2026\':fontcolor=white:fontsize=28:x=(w-text_w)/2:y=1220:box=1:boxcolor=red@0.9:boxborderw=8" -map 0:v -map "[aout]" -c:v libx264 -preset ultrafast -crf 28 -t 45 -r 24 ' + outputFile;
+      } else {
+        ffmpegCmd = 'ffmpeg -y -i ' + clipPath + ' -vf "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=720:1280,setpts=PTS/1.05,drawtext=text=\'GOAL\':fontcolor=yellow:fontsize=80:x=(w-text_w)/2:y=80:shadowcolor=black:shadowx=4:shadowy=4:box=1:boxcolor=black@0.5:boxborderw=10,drawtext=text=\'' + scorerText + '\':fontcolor=white:fontsize=50:x=(w-text_w)/2:y=180:box=1:boxcolor=red@0.8:boxborderw=10,drawtext=text=\'' + scoreText + '\':fontcolor=white:fontsize=40:x=(w-text_w)/2:y=260:box=1:boxcolor=black@0.7:boxborderw=8,drawtext=text=\'FIFA WORLD CUP 2026\':fontcolor=white:fontsize=28:x=(w-text_w)/2:y=1220:box=1:boxcolor=red@0.9:boxborderw=8" -c:v libx264 -preset ultrafast -crf 28 -t 45 -r 24 ' + outputFile;
+      }
     } else {
       console.log('Using animated fallback');
-      // Hype audio: dramatic goal celebration tone — sine sweep from low to high
-      const audioFilter = 'aevalsrc=\'0.4*sin(2*PI*(300+t*200)*t)+0.3*sin(2*PI*(600+t*100)*t)+0.2*sin(2*PI*880*t)\':s=44100:c=stereo,volume=2,afade=t=in:st=0:d=0.5,afade=t=out:st=18:d=2';
-      ffmpegCmd = 'ffmpeg -y -f lavfi -i color=c=0x1a1a2e:size=720x1280:rate=24 -f lavfi -i "' + audioFilter + '" -vf "drawtext=text=\'GOAL\':fontcolor=yellow:fontsize=120:x=(w-text_w)/2:y=250:shadowcolor=black:shadowx=6:shadowy=6,drawtext=text=\'' + scorerText + '\':fontcolor=white:fontsize=55:x=(w-text_w)/2:y=430:box=1:boxcolor=red@0.8:boxborderw=12,drawtext=text=\'' + scoreText + '\':fontcolor=white:fontsize=42:x=(w-text_w)/2:y=530:box=1:boxcolor=black@0.7:boxborderw=10,drawtext=text=\'FIFA WORLD CUP 2026\':fontcolor=white:fontsize=30:x=(w-text_w)/2:y=1200:box=1:boxcolor=red@0.9:boxborderw=8" -map 0:v -map 1:a -c:v libx264 -preset ultrafast -crf 28 -t 20 -r 24 -shortest ' + outputFile;
+      if (hasAudio) {
+        ffmpegCmd = 'ffmpeg -y -f lavfi -i color=c=0x1a1a2e:size=720x1280:rate=24 -i ' + audioPath + ' -vf "drawtext=text=\'GOAL\':fontcolor=yellow:fontsize=120:x=(w-text_w)/2:y=250:shadowcolor=black:shadowx=6:shadowy=6,drawtext=text=\'' + scorerText + '\':fontcolor=white:fontsize=55:x=(w-text_w)/2:y=430:box=1:boxcolor=red@0.8:boxborderw=12,drawtext=text=\'' + scoreText + '\':fontcolor=white:fontsize=42:x=(w-text_w)/2:y=530:box=1:boxcolor=black@0.7:boxborderw=10,drawtext=text=\'FIFA WORLD CUP 2026\':fontcolor=white:fontsize=30:x=(w-text_w)/2:y=1200:box=1:boxcolor=red@0.9:boxborderw=8" -map 0:v -map 1:a -c:v libx264 -preset ultrafast -crf 28 -t 20 -r 24 -shortest ' + outputFile;
+      } else {
+        ffmpegCmd = 'ffmpeg -y -f lavfi -i color=c=0x1a1a2e:size=720x1280:rate=24 -f lavfi -i anullsrc=r=44100:cl=stereo -vf "drawtext=text=\'GOAL\':fontcolor=yellow:fontsize=120:x=(w-text_w)/2:y=250:shadowcolor=black:shadowx=6:shadowy=6,drawtext=text=\'' + scorerText + '\':fontcolor=white:fontsize=55:x=(w-text_w)/2:y=430:box=1:boxcolor=red@0.8:boxborderw=12,drawtext=text=\'' + scoreText + '\':fontcolor=white:fontsize=42:x=(w-text_w)/2:y=530:box=1:boxcolor=black@0.7:boxborderw=10,drawtext=text=\'FIFA WORLD CUP 2026\':fontcolor=white:fontsize=30:x=(w-text_w)/2:y=1200:box=1:boxcolor=red@0.9:boxborderw=8" -map 0:v -map 1:a -c:v libx264 -preset ultrafast -crf 28 -t 20 -r 24 -shortest ' + outputFile;
+      }
     }
 
     execSync(ffmpegCmd, { timeout: 120000 });
     if (clipPath && fs.existsSync(clipPath)) fs.unlinkSync(clipPath);
+    if (hasAudio) fs.unlinkSync(audioPath);
 
     const filename = path.basename(outputFile);
     const videoUrl = req.protocol + '://' + req.get('host') + '/videos/' + filename;
