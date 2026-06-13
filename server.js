@@ -4,149 +4,140 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
-
+ 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use('/videos', express.static('/tmp/videos'));
-
+ 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
-
-// Download file from URL
+ 
 function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
     https.get(url, res => {
-      res.pipe(file);
-      file.on('finish', () => { file.close(); resolve(); });
+      if (res.statusCode === 302 || res.statusCode === 301) {
+        https.get(res.headers.location, res2 => {
+          res2.pipe(file);
+          file.on('finish', () => { file.close(); resolve(); });
+        }).on('error', reject);
+      } else {
+        res.pipe(file);
+        file.on('finish', () => { file.close(); resolve(); });
+      }
     }).on('error', err => { fs.unlink(dest, () => {}); reject(err); });
   });
 }
-
-// Search Unsplash for free player/stadium photos
-async function getPlayerPhoto(playerName, teamName) {
+ 
+async function searchAndDownloadGoalClip(homeTeam, awayTeam, scorer, minute, matchId) {
   try {
-    const query = encodeURIComponent(`${playerName} football soccer`);
-    const url = `https://api.unsplash.com/search/photos?query=${query}&per_page=1&orientation=portrait`;
-    
-    const response = await fetch(url, {
-      headers: { 'Authorization': `Client-ID ${process.env.UNSPLASH_ACCESS_KEY}` }
-    });
-    const data = await response.json();
-    
-    if (data.results && data.results.length > 0) {
-      return data.results[0].urls.regular;
+    const queries = [
+      `FIFA World Cup 2026 ${scorer} goal ${homeTeam} ${awayTeam}`,
+      `FIFA World Cup 2026 ${homeTeam} ${awayTeam} goal highlight`,
+      `World Cup 2026 ${homeTeam} vs ${awayTeam} goal`
+    ];
+    for (const query of queries) {
+      try {
+        const rawFile = `/tmp/raw_${matchId}.mp4`;
+        const ytCmd = `yt-dlp "ytsearch1:${query}" -f "best[height<=720][ext=mp4]/best[height<=720]/best" -o "${rawFile}" --no-playlist --socket-timeout 30 --max-downloads 1 --match-filter "duration < 180" --quiet`;
+        execSync(ytCmd, { timeout: 60000 });
+        if (fs.existsSync(rawFile)) {
+          console.log('Downloaded clip for: ' + query);
+          return rawFile;
+        }
+      } catch(e) {
+        console.log('Search failed for: ' + query);
+        continue;
+      }
     }
-    
-    // Fallback: stadium photo
-    const stadiumQuery = encodeURIComponent(`${teamName} football stadium`);
-    const stadiumUrl = `https://api.unsplash.com/search/photos?query=${stadiumQuery}&per_page=1`;
-    const stadiumRes = await fetch(stadiumUrl, {
-      headers: { 'Authorization': `Client-ID ${process.env.UNSPLASH_ACCESS_KEY}` }
-    });
-    const stadiumData = await stadiumRes.json();
-    return stadiumData.results?.[0]?.urls?.regular ?? null;
-  } catch (e) {
+    return null;
+  } catch(e) {
     return null;
   }
 }
-
+ 
+async function getTeamPhoto(teamName) {
+  try {
+    const query = encodeURIComponent(teamName + ' national football team');
+    const url = 'https://api.unsplash.com/search/photos?query=' + query + '&per_page=1&orientation=landscape';
+    const response = await fetch(url, {
+      headers: { 'Authorization': 'Client-ID ' + process.env.UNSPLASH_ACCESS_KEY }
+    });
+    const data = await response.json();
+    return data.results && data.results[0] ? data.results[0].urls.regular : null;
+  } catch(e) {
+    return null;
+  }
+}
+ 
 app.post('/process-goal', async (req, res) => {
-  const { homeTeam, awayTeam, scorer, minute, homeScore, awayScore, matchId } = req.body;
-
+  const {
+    homeTeam = 'Home',
+    awayTeam = 'Away',
+    scorer = 'Unknown',
+    minute = 0,
+    homeScore = 0,
+    awayScore = 0,
+    matchId = Date.now()
+  } = req.body;
+ 
   try {
     const outputDir = '/tmp/videos';
     if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-
-    const outputFile = `${outputDir}/goal_${matchId}_${Date.now()}.mp4`;
-    const scoreText = `${homeTeam} ${homeScore} - ${awayScore} ${awayTeam}`;
-    const scorerText = `GOAL! ${scorer} ${minute}'`;
-
-    // Get player photo
-    const photoUrl = await getPlayerPhoto(scorer, homeTeam);
-    let photoPath = null;
-
-    if (photoUrl) {
-      photoPath = `/tmp/player_${matchId}.jpg`;
-      await downloadFile(photoUrl, photoPath);
-    }
-
-    // Download royalty-free crowd noise
-    const audioPath = `/tmp/crowd_${matchId}.mp3`;
-    const audioUrl = 'https://www.soundjay.com/human/sounds/crowd-cheer-1.mp3';
-    try { await downloadFile(audioUrl, audioPath); } catch(e) {}
-
-    const hasAudio = fs.existsSync(audioPath);
-    const hasPhoto = photoPath && fs.existsSync(photoPath);
-
-    // Generate cinematic Short with FFmpeg
+ 
+    const outputFile = outputDir + '/goal_' + matchId + '_' + Date.now() + '.mp4';
+    const safeScorer = String(scorer).replace(/['":\\[\]]/g, '').trim();
+    const safeHome = String(homeTeam).replace(/['":\\[\]]/g, '').trim();
+    const safeAway = String(awayTeam).replace(/['":\\[\]]/g, '').trim();
+    const scoreText = safeHome + ' ' + homeScore + ' - ' + awayScore + ' ' + safeAway;
+    const scorerText = safeScorer + ' ' + minute + 'min';
+ 
+    console.log('Searching for FIFA clip...');
+    const clipPath = await searchAndDownloadGoalClip(homeTeam, awayTeam, scorer, minute, matchId);
+ 
     let ffmpegCmd;
-
-    if (hasPhoto) {
-      ffmpegCmd = `ffmpeg -y \
-        -loop 1 -i ${photoPath} \
-        ${hasAudio ? `-i ${audioPath}` : ''} \
-        -vf "
-          scale=1080:1920:force_original_aspect_ratio=increase,
-          crop=1080:1920,
-          boxblur=10:10,
-          colorize=hue=200:saturation=0.3,
-          drawtext=text='⚽ GOAL!':fontcolor=yellow:fontsize=120:x=(w-text_w)/2:y=300:shadowcolor=black:shadowx=4:shadowy=4:box=1:boxcolor=black@0.5:boxborderw=20,
-          drawtext=text='${scorerText}':fontcolor=white:fontsize=72:x=(w-text_w)/2:y=500:shadowcolor=black:shadowx=3:shadowy=3:box=1:boxcolor=red@0.8:boxborderw=15,
-          drawtext=text='${scoreText}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=650:box=1:boxcolor=black@0.7:boxborderw=12,
-          drawtext=text='FIFA WORLD CUP 2026':fontcolor=white:fontsize=36:x=(w-text_w)/2:y=1820:box=1:boxcolor=red@0.9:boxborderw=10
-        " \
-        ${hasAudio ? '-map 0:v -map 1:a -shortest' : ''} \
-        -c:v libx264 -preset fast -crf 23 \
-        -t 30 \
-        -r 30 \
-        ${outputFile}`;
+ 
+    if (clipPath && fs.existsSync(clipPath)) {
+      console.log('Using real FIFA clip');
+      ffmpegCmd = 'ffmpeg -y -i ' + clipPath + ' -vf "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=720:1280,setpts=PTS/1.05,drawtext=text=\'GOAL\':fontcolor=yellow:fontsize=80:x=(w-text_w)/2:y=80:shadowcolor=black:shadowx=4:shadowy=4:box=1:boxcolor=black@0.5:boxborderw=10,drawtext=text=\'' + scorerText + '\':fontcolor=white:fontsize=50:x=(w-text_w)/2:y=180:box=1:boxcolor=red@0.8:boxborderw=10,drawtext=text=\'' + scoreText + '\':fontcolor=white:fontsize=40:x=(w-text_w)/2:y=260:box=1:boxcolor=black@0.7:boxborderw=8,drawtext=text=\'FIFA WORLD CUP 2026\':fontcolor=white:fontsize=28:x=(w-text_w)/2:y=1220:box=1:boxcolor=red@0.9:boxborderw=8" -af "atempo=1.05" -c:v libx264 -preset ultrafast -crf 28 -t 45 -r 24 ' + outputFile;
     } else {
-      // Pure graphic fallback — no photo
-      ffmpegCmd = `ffmpeg -y \
-        -f lavfi -i color=c=0x1a1a2e:size=1080x1920:rate=30 \
-        ${hasAudio ? `-i ${audioPath}` : ''} \
-        -vf "
-          drawtext=text='⚽':fontsize=200:x=(w-text_w)/2:y=400:fontcolor=white,
-          drawtext=text='GOAL!':fontcolor=yellow:fontsize=150:x=(w-text_w)/2:y=650:shadowcolor=black:shadowx=5:shadowy=5,
-          drawtext=text='${scorer}':fontcolor=white:fontsize=80:x=(w-text_w)/2:y=850:box=1:boxcolor=red@0.8:boxborderw=15,
-          drawtext=text='${minute} MINUTES':fontcolor=white:fontsize=60:x=(w-text_w)/2:y=980:box=1:boxcolor=black@0.6:boxborderw=12,
-          drawtext=text='${scoreText}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=1100:box=1:boxcolor=black@0.7:boxborderw=12,
-          drawtext=text='FIFA WORLD CUP 2026':fontcolor=white:fontsize=36:x=(w-text_w)/2:y=1820:box=1:boxcolor=red@0.9:boxborderw=10
-        " \
-        ${hasAudio ? '-map 0:v -map 1:a -shortest' : ''} \
-        -c:v libx264 -preset fast -crf 23 \
-        -t 30 \
-        -r 30 \
-        ${outputFile}`;
+      console.log('No clip found - trying team photo');
+      const photoUrl = await getTeamPhoto(homeTeam);
+      let photoPath = null;
+ 
+      if (photoUrl) {
+        photoPath = '/tmp/team_' + matchId + '.jpg';
+        try {
+          await downloadFile(photoUrl, photoPath);
+          if (!fs.existsSync(photoPath)) photoPath = null;
+        } catch(e) {
+          photoPath = null;
+          console.log('Photo download failed, using animated fallback');
+        }
+      }
+ 
+      if (photoPath) {
+        console.log('Using team photo background');
+        ffmpegCmd = 'ffmpeg -y -loop 1 -i ' + photoPath + ' -f lavfi -i anullsrc=r=44100:cl=stereo -vf "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=6:6,drawtext=text=\'GOAL\':fontcolor=yellow:fontsize=100:x=(w-text_w)/2:y=200:shadowcolor=black:shadowx=5:shadowy=5,drawtext=text=\'' + scorerText + '\':fontcolor=white:fontsize=55:x=(w-text_w)/2:y=360:box=1:boxcolor=red@0.8:boxborderw=12,drawtext=text=\'' + scoreText + '\':fontcolor=white:fontsize=42:x=(w-text_w)/2:y=460:box=1:boxcolor=black@0.7:boxborderw=10,drawtext=text=\'FIFA WORLD CUP 2026\':fontcolor=white:fontsize=30:x=(w-text_w)/2:y=1200:box=1:boxcolor=red@0.9:boxborderw=8" -map 0:v -map 1:a -c:v libx264 -preset ultrafast -crf 28 -t 20 -r 24 -shortest ' + outputFile;
+        if (fs.existsSync(photoPath)) fs.unlinkSync(photoPath);
+      } else {
+        console.log('Using animated fallback');
+        ffmpegCmd = 'ffmpeg -y -f lavfi -i color=c=0x1a1a2e:size=720x1280:rate=24 -f lavfi -i anullsrc=r=44100:cl=stereo -vf "drawtext=text=\'GOAL\':fontcolor=yellow:fontsize=120:x=(w-text_w)/2:y=250:shadowcolor=black:shadowx=6:shadowy=6,drawtext=text=\'' + scorerText + '\':fontcolor=white:fontsize=55:x=(w-text_w)/2:y=430:box=1:boxcolor=red@0.8:boxborderw=12,drawtext=text=\'' + scoreText + '\':fontcolor=white:fontsize=42:x=(w-text_w)/2:y=530:box=1:boxcolor=black@0.7:boxborderw=10,drawtext=text=\'FIFA WORLD CUP 2026\':fontcolor=white:fontsize=30:x=(w-text_w)/2:y=1200:box=1:boxcolor=red@0.9:boxborderw=8" -map 0:v -map 1:a -c:v libx264 -preset ultrafast -crf 28 -t 20 -r 24 -shortest ' + outputFile;
+      }
     }
-
-    // Clean up the command (remove newlines for exec)
-    const cleanCmd = ffmpegCmd.replace(/\n\s+/g, ' ').replace(/\s+/g, ' ');
-    execSync(cleanCmd, { timeout: 120000 });
-
-    // Cleanup temp files
-    if (photoPath && fs.existsSync(photoPath)) fs.unlinkSync(photoPath);
-    if (hasAudio) fs.unlinkSync(audioPath);
-
+ 
+    execSync(ffmpegCmd, { timeout: 120000 });
+    if (clipPath && fs.existsSync(clipPath)) fs.unlinkSync(clipPath);
+ 
     const filename = path.basename(outputFile);
-    const videoUrl = `${req.protocol}://${req.get('host')}/videos/${filename}`;
-
-    console.log(`✅ Video ready: ${videoUrl}`);
-
-    res.json({
-      success: true,
-      videoUrl,
-      scorer,
-      minute,
-      scoreDisplay: scoreText
-    });
-
+    const videoUrl = req.protocol + '://' + req.get('host') + '/videos/' + filename;
+    res.json({ success: true, videoUrl, scorer, minute, scoreDisplay: scoreText });
+ 
   } catch (error) {
     console.error('Error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
+ 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`WC Goal Processor running on port ${PORT}`));
+app.listen(PORT, () => console.log('Running on port ' + PORT));
